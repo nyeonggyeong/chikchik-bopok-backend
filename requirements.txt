@@ -3,3 +3,7 @@ uvicorn
 python-multipart
 ultralytics
 pillow
+numpy
+torch
+torchvision
+timm

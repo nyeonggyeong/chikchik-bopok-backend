@@ -144,9 +144,10 @@ class LiteMonoDepthEstimator:
 depth_estimator = LiteMonoDepthEstimator()
 
 
-def _extract_objects(result: Any, image_area: float, depth_map: np.ndarray | None = None) -> List[Dict[str, Any]]:
+def _extract_objects(result: Any, image_width: float, image_height: float, depth_map: np.ndarray | None = None) -> List[Dict[str, Any]]:
     names = result.names
     detected_objects: List[Dict[str, Any]] = []
+    image_area = image_width * image_height
 
     for box in result.boxes:
         x1, y1, x2, y2 = box.xyxy[0].tolist()
@@ -159,14 +160,19 @@ def _extract_objects(result: Any, image_area: float, depth_map: np.ndarray | Non
         bbox_area = width * height
         area_ratio_percent = (bbox_area / image_area) * 100 if image_area > 0 else 0.0
 
+        x_norm = x1 / image_width if image_width > 0 else 0.0
+        y_norm = y1 / image_height if image_height > 0 else 0.0
+        w_norm = width / image_width if image_width > 0 else 0.0
+        h_norm = height / image_height if image_height > 0 else 0.0
+
         obj: Dict[str, Any] = {
             "class_name": class_name,
             "confidence": round(confidence, 4),
             "bbox": {
-                "x": round(float(x1), 2),
-                "y": round(float(y1), 2),
-                "w": round(float(width), 2),
-                "h": round(float(height), 2),
+                "x": round(float(x_norm), 4),
+                "y": round(float(y_norm), 4),
+                "w": round(float(w_norm), 4),
+                "h": round(float(h_norm), 4),
             },
             "area_ratio_percent": round(area_ratio_percent, 2),
             "is_over_30_percent": area_ratio_percent > 30.0,
@@ -246,7 +252,7 @@ async def predict_objects(file: UploadFile = File(...)) -> Dict[str, Any]:
         }
 
     result = results[0]
-    detected_objects = _extract_objects(result, image_area=image_area)
+    detected_objects = _extract_objects(result, image_width=float(image_width), image_height=float(image_height))
 
     return {
         "filename": file.filename,
@@ -282,7 +288,7 @@ async def predict_objects_with_distance(file: UploadFile = File(...)) -> Dict[st
         }
 
     depth_map = depth_estimator.predict_depth_map(pil_image)
-    detected_objects = _extract_objects(results[0], image_area=image_area, depth_map=depth_map)
+    detected_objects = _extract_objects(results[0], image_width=float(image_width), image_height=float(image_height), depth_map=depth_map)
 
     return {
         "filename": file.filename,

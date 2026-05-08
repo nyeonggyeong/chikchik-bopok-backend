@@ -10,6 +10,7 @@ env/
 
 # Model weights (download automatically at runtime)
 yolo11n.pt
+calibration_data.json
 
 # OS/Editor
 .DS_Store

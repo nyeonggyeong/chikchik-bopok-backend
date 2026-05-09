@@ -1,3 +1,8 @@
+# .env 파일
+LITEMONO_REPO_PATH=.\Lite-Mono
+LITEMONO_WEIGHTS_DIR=.\lite-mono-weights
+LITEMONO_MODEL_NAME=lite-mono
+
 # chikchik-bopok-server
 
 FastAPI backend for object detection using YOLO11 (`yolo11n.pt`) and optional Lite-Mono distance estimation.

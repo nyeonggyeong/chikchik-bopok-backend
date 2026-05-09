@@ -6,7 +6,10 @@ from typing import Any, Dict, List
 from fastapi import FastAPI, File, HTTPException, UploadFile
 import numpy as np
 from PIL import Image
+from dotenv import load_dotenv
 from ultralytics import YOLO
+
+load_dotenv()
 
 app = FastAPI(title="ChikChik-Bopok Object Detection API")
 

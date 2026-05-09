@@ -11,7 +11,7 @@ MODEL_WEIGHTS = "yolo11n.pt"
 model = YOLO(MODEL_WEIGHTS)
 
 
-def _extract_objects(result: Any, image_width: float, image_height: float, depth_map: np.ndarray | None = None) -> List[Dict[str, Any]]:
+def _extract_objects(result: Any, image_width: float, image_height: float, depth_map: np.ndarray | None = None, danger_threshold: float = 1.5) -> List[Dict[str, Any]]:
     names = result.names
     detected_objects: List[Dict[str, Any]] = []
     image_area = image_width * image_height
@@ -63,7 +63,7 @@ def _extract_objects(result: Any, image_width: float, image_height: float, depth
                     distance_level = "far"
                 obj["distance_estimate_m"] = round(distance_m, 2)
                 obj["distance_level"] = distance_level
-                obj["is_dangerous"] = bool(obj["is_over_30_percent"] or distance_level == "near")
+                obj["is_dangerous"] = bool(obj["area_ratio_percent"] > 20.0 and distance_m <= danger_threshold)
             else:
                 obj["distance_estimate_m"] = None
                 obj["distance_level"] = "unknown"

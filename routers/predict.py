@@ -1,6 +1,6 @@
 from typing import Any, Dict
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from services.depth import LITEMONO_MODEL_NAME, depth_estimator
 from services.detection import _extract_objects, _read_image, model
@@ -37,7 +37,7 @@ async def predict_objects(file: UploadFile = File(...)) -> Dict[str, Any]:
 
 
 @router.post("/objects-distance")
-async def predict_objects_with_distance(file: UploadFile = File(...)) -> Dict[str, Any]:
+async def predict_objects_with_distance(file: UploadFile = File(...), danger_threshold: float = Form(1.5)) -> Dict[str, Any]:
     pil_image = await _read_image(file)
     image_width, image_height = pil_image.size
     image_area = float(image_width * image_height)
@@ -62,7 +62,7 @@ async def predict_objects_with_distance(file: UploadFile = File(...)) -> Dict[st
         }
 
     depth_map = depth_estimator.predict_depth_map(pil_image)
-    detected_objects = _extract_objects(results[0], image_width=float(image_width), image_height=float(image_height), depth_map=depth_map)
+    detected_objects = _extract_objects(results[0], image_width=float(image_width), image_height=float(image_height), depth_map=depth_map, danger_threshold=danger_threshold)
 
     return {
         "filename": file.filename,

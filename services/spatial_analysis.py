@@ -242,7 +242,25 @@ def _process_single_object(
         "near" if dist_val < 1.5 else ("mid" if dist_val < 3.0 else "far")
     )
     confidence_f = round(float(obj.confidence), 4)
-    is_dangerous = bool(area_ratio_percent > 20.0 and dist_val <= danger_threshold)
+    
+    # ROI (바닥 필터링): y 중심이 화면 하단 15% (0.85 ~ 1.0) 에 위치하면 가중치 하향
+    y_norm = y_center / ih if ih > 0 else 0.5
+    is_ground = y_norm > 0.85
+
+    warning_threshold = danger_threshold * 1.5
+    if area_ratio_percent > 20.0 and not is_ground:
+        if dist_val <= danger_threshold:
+            risk_level = 2
+            is_dangerous = True
+        elif dist_val <= warning_threshold:
+            risk_level = 1
+            is_dangerous = False
+        else:
+            risk_level = 0
+            is_dangerous = False
+    else:
+        risk_level = 0
+        is_dangerous = False
 
     return {
     "label": obj.label,
@@ -268,6 +286,7 @@ def _process_single_object(
         "distance_estimate_m": distance_estimate_m,
         "distance_level": distance_level,
         "is_dangerous": is_dangerous,
+        "risk_level": risk_level,
         "area_ratio_percent": round(area_ratio_percent, 2),
         "is_over_30_percent": area_ratio_percent > 30.0,
     }

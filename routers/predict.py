@@ -22,6 +22,7 @@ class SpatialAnalysisObject(BaseModel):
     x2: float
     y2: float
     distance_estimate_m: float
+    risk_level: int
 
 
 class PredictObjectsSpatialResponse(BaseModel):
@@ -104,6 +105,7 @@ async def predict_objects_distance(
             x2=o["x2"],
             y2=o["y2"],
             distance_estimate_m=o["distance_estimate_m"],
+            risk_level=o.get("risk_level", 0),
         )
         for o in analyzed_data
     ]

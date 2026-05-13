@@ -9,6 +9,9 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 OVERLAP_RATIO_THRESHOLD_DEFAULT = 0.3
+CENTER_DANGER_THRESHOLD = 5.0
+SIDE_DANGER_THRESHOLD = 10.0
+STOP_THRESHOLD = 15.0
 
 
 def _subject_particle_iga(word: str) -> str:
@@ -109,18 +112,80 @@ def detections_from_yolo(yolo_image_result: Any) -> List[SpatialDetection]:
 
     return out
 
-
-def _norm_label(label: str) -> str:
-    return str(label).lower()
-
-
 _LABEL_KR: Dict[str, str] = {
-    "chair": "의자",
     "person": "사람",
+    "chair": "의자",
+    "car": "자동차",
+    "truck": "트럭",
+    "bus": "버스",
+    "bicycle": "자전거",
+    "motorcycle": "오토바이",
+    "traffic light": "신호등",
+    "stop sign": "정지 표지판",
+    "bench": "벤치",
+    "couch": "소파",
+    "toilet": "변기",
+    "stairs": "계단",
     "door": "문",
+    "table": "테이블",
+    "pole": "기둥",
+    "potted plant": "화분",
+    "dog": "개",
+    "cat": "고양이",
+    "wall": "벽",
+    "curb": "턱",
+    "crosswalk": "횡단보도",
     "handle": "손잡이",
 }
 
+# 객체 추적 및 분석을 위한 전역 상태 (메모리 내 캐시)
+_object_history: Dict[str, Dict[str, Any]] = {} # {label: {"depth": [], "area": [], "pos": []}}
+
+def _determine_motion_state(label: str, current_dist: float, current_area: float) -> str:
+    """깊이와 면적 변화를 동시에 분석하여 접근 속도 판단 (Phase 5.6)"""
+    if label not in _object_history:
+        _object_history[label] = {"depth": [], "area": [], "pos": []}
+    
+    hist = _object_history[label]
+    hist["depth"].append(current_dist)
+    hist["area"].append(current_area)
+    
+    if len(hist["depth"]) > 5:
+        hist["depth"].pop(0)
+        hist["area"].pop(0)
+    
+    if len(hist["depth"]) < 3:
+        return "stable"
+    
+    # 최근 3~5프레임 추세
+    depth_diffs = [hist["depth"][i] - hist["depth"][i-1] for i in range(1, len(hist["depth"]))]
+    area_diffs = [hist["area"][i] - hist["area"][i-1] for i in range(1, len(hist["area"]))]
+    
+    avg_depth_diff = sum(depth_diffs) / len(depth_diffs)
+    avg_area_diff = sum(area_diffs) / len(area_diffs)
+    
+    # 거리는 줄어들고 면적은 늘어날 때만 '접근'으로 판단 (오탐 방지)
+    if avg_depth_diff < -0.15 and avg_area_diff > 0.5:
+        return "approaching_fast"
+    elif avg_depth_diff < -0.05 and avg_area_diff > 0.1:
+        return "approaching_slow"
+    elif avg_depth_diff > 0.05 and avg_area_diff < -0.1:
+        return "moving_away"
+    else:
+        return "stable"
+
+def _get_smoothed_distance(label: str, current_dist: float) -> float:
+    """이동평균을 활용한 거리 스무딩"""
+    if label not in _object_history:
+        return current_dist
+    
+    depths = _object_history[label]["depth"]
+    if not depths:
+        return current_dist
+    
+    # 최근 3프레임 평균
+    recent = depths[-3:] if len(depths) >= 3 else depths
+    return sum(recent) / len(recent)
 
 def analyze_spatial_results(
     detections: List[Any],
@@ -129,66 +194,84 @@ def analyze_spatial_results(
     image_height: int,
     overlap_threshold: float = 0.3,
     danger_threshold: float = 1.5,
+    reference_depth: float = 1.0,
 ) -> List[Dict[str, Any]]:
     """
-    탐지 리스트와 깊이 맵으로 위치·거리·빈 좌석·음성 설명을 계산합니다.
-
-    빈 좌석이 아니라 판별하려면 (1) 교집합 면적/의자 면적 비율이 임계 이상이고
-    (2) 사람 박스 하단 중심점(발 근처)이 의자 박스 안에 있어야 합니다.
+    탐지 리스트와 깊이 맵으로 위치·거리·위험도를 계산합니다. (Phase 5.6 개선)
     """
     logger.info("spatial_analysis: 인식된 객체 수: %s", len(detections))
     if not detections:
         return []
 
-    chairs = [d for d in detections if _norm_label(d.label) in ("chair", "toilet", "bench", "couch")]
+    analyzed_objects: List[Dict[str, Any]] = []
+    
+    # 1. 객체별 상세 분석 수행
+    chairs = [d for d in detections if _norm_label(d.label) in ("chair", "toilet", "bench", "couch", "sofa")]
     people = [d for d in detections if _norm_label(d.label) == "person"]
     others = [d for d in detections if _norm_label(d.label) not in ("chair", "person")]
 
-    analyzed_objects: List[Dict[str, Any]] = []
-
+    # 의자 점유 판별 및 처리
     for chair in chairs:
         is_empty = True
-        # 디버깅을 위해 현재 의자 정보 로그
-        logger.info(f"의자 분석 중... Conf: {chair.confidence:.2f}")
-
         for person in people:
             if _is_person_occupying_chair(chair, person, depth_map, overlap_threshold):
                 is_empty = False
-                logger.info(f" -> [점유됨] 사람 박스와 중첩 확인")
                 break
-        
-        if is_empty:
-            logger.info(f" -> [빈 좌석!] 점유자 없음")
-
-        analyzed_objects.append(
-            _process_single_object(
-                chair,
-                depth_map,
-                image_width,
-                image_height,
-                is_empty=is_empty,
-                danger_threshold=danger_threshold,
-            )
-        )
+        analyzed_objects.append(_process_single_object(chair, depth_map, image_width, image_height, is_empty=is_empty, danger_threshold=danger_threshold, reference_depth=reference_depth))
 
     for obj in people + others:
-        analyzed_objects.append(
-            _process_single_object(
-                obj,
-                depth_map,
-                image_width,
-                image_height,
-                is_empty=None,
-                danger_threshold=danger_threshold,
-            )
-        )
+        analyzed_objects.append(_process_single_object(obj, depth_map, image_width, image_height, is_empty=None, danger_threshold=danger_threshold, reference_depth=reference_depth))
 
-    priority_map = {"chair": 0, "person": 1, "handle": 2, "door": 3}
-    analyzed_objects.sort(
-        key=lambda x: (priority_map.get(_norm_label(x["label"]), 99), -float(x["confidence"]))
-    )
+    # 2. 우선순위 정렬 및 display_objects 선정 (Phase 5.6 요구사항)
+    # 정렬 기준: risk_level > front 우선 > bbox 면적 > 거리
+    def sort_key(x):
+        rl = x.get("risk_level", 0)
+        pos = x.get("position", "")
+        # 전방 객체에 가점
+        pos_score = 10 if pos in ("front", "center") else 0
+        area = x.get("area_ratio_percent", 0.0)
+        dist = -x.get("estimated_distance_m", 99.0) # 가까운 것 우선
+        return (rl, pos_score, area, dist)
 
+    analyzed_objects.sort(key=sort_key, reverse=True)
+    
+    # 3. 보조 위험 객체 후보 선정 (회피 방향 등에 영향 주는 객체)
+    # 이 부분은 calculate_safe_direction 이후에 추가 필터링이 필요할 수 있음
     return analyzed_objects
+
+
+def calculate_safe_direction(analyzed_objects: List[Dict[str, Any]]) -> str:
+    """
+    영역별 위험 점수를 계산하여 가장 안전한 방향을 추천합니다.
+    """
+    left_score = 0.0
+    center_score = 0.0
+    right_score = 0.0
+    
+    for obj in analyzed_objects:
+        rl = obj.get("risk_level", 0)
+        if rl == 0: continue
+        
+        dist = obj.get("estimated_distance_m", 5.0)
+        area = obj.get("area_ratio_percent", 1.0)
+        weight = 10.0 if rl == 2 else 3.0
+        obj_score = weight * (2.0 / max(dist, 0.5)) * (area / 10.0)
+        
+        pos = obj.get("position", "center")
+        if pos == "left": left_score += obj_score
+        elif pos == "right": right_score += obj_score
+        else: center_score += obj_score
+            
+    if center_score > CENTER_DANGER_THRESHOLD:
+        if left_score < CENTER_DANGER_THRESHOLD and left_score <= right_score: return "left"
+        elif right_score < CENTER_DANGER_THRESHOLD and right_score <= left_score: return "right"
+        else: return "stop"
+            
+    if left_score > SIDE_DANGER_THRESHOLD and right_score < CENTER_DANGER_THRESHOLD: return "right"
+    if right_score > SIDE_DANGER_THRESHOLD and left_score < CENTER_DANGER_THRESHOLD: return "left"
+    if (left_score + center_score + right_score) > STOP_THRESHOLD: return "stop"
+        
+    return "forward"
 
 
 def _process_single_object(
@@ -199,6 +282,7 @@ def _process_single_object(
     is_empty: Optional[bool] = None,
     *,
     danger_threshold: float = 1.5,
+    reference_depth: float = 1.0,
 ) -> Dict[str, Any]:
     x_center = int((obj.x1 + obj.x2) / 2)
     y_center = int((obj.y1 + obj.y2) / 2)
@@ -206,87 +290,77 @@ def _process_single_object(
     xi = min(max(x_center, 0), w - 1)
     yi = min(max(y_center, 0), h - 1)
 
-    dist_val = float(depth_map[yi, xi])
+    raw_depth = float(depth_map[yi, xi])
 
     iw = float(width)
     ih = float(image_height)
-    pos_ratio = (x_center / iw) if iw > 0 else 0.5
-
-    if pos_ratio < 0.33:
-        position = "왼쪽"
-    elif pos_ratio > 0.66:
-        position = "오른쪽"
-    else:
-        position = "중앙"
-
-    speech_pos = "정면" if position == "중앙" else position
-    lk = _norm_label(obj.label)
-    display_kr = _LABEL_KR.get(lk, str(obj.label))
-
-    if lk == "chair" and is_empty is True:
-        description = _describe_with_iga(speech_pos, dist_val, "빈 좌석")
-    elif lk == "chair" and is_empty is False:
-        description = f"{speech_pos} {dist_val:.1f}미터 지점의 의자는 사용 중입니다."
-    else:
-        description = _describe_with_iga(speech_pos, dist_val, display_kr)
-
-    x1, y1, x2, y2 = float(obj.x1), float(obj.y1), float(obj.x2), float(obj.y2)
-    w_px = max(0.0, x2 - x1)
-    h_px = max(0.0, y2 - y1)
-    image_area = iw * ih
-    bbox_area = w_px * h_px
-    area_ratio_percent = (bbox_area / image_area) * 100 if image_area > 0 else 0.0
-
-    distance_estimate_m = round(dist_val, 2)
-    distance_level: str = (
-        "near" if dist_val < 1.5 else ("mid" if dist_val < 3.0 else "far")
-    )
-    confidence_f = round(float(obj.confidence), 4)
-    
-    # ROI (바닥 필터링): y 중심이 화면 하단 15% (0.85 ~ 1.0) 에 위치하면 가중치 하향
+    x_norm = x_center / iw if iw > 0 else 0.5
     y_norm = y_center / ih if ih > 0 else 0.5
-    is_ground = y_norm > 0.85
 
-    warning_threshold = danger_threshold * 1.5
-    if area_ratio_percent > 20.0 and not is_ground:
-        if dist_val <= danger_threshold:
-            risk_level = 2
-            is_dangerous = True
-        elif dist_val <= warning_threshold:
-            risk_level = 1
-            is_dangerous = False
-        else:
-            risk_level = 0
-            is_dangerous = False
+    if y_norm > 0.5 and 0.33 <= x_norm <= 0.66:
+        position, position_ko = "front", "전방"
+    elif 0.33 <= x_norm <= 0.66:
+        position, position_ko = "center", "중앙"
+    elif x_norm < 0.33:
+        position, position_ko = "left", "왼쪽"
     else:
-        risk_level = 0
-        is_dangerous = False
+        position, position_ko = "right", "오른쪽"
+
+    lk = _norm_label(obj.label)
+    label_ko = _LABEL_KR.get(lk, str(obj.label))
+
+    # BBox 면적 계산
+    x1, y1, x2, y2 = float(obj.x1), float(obj.y1), float(obj.x2), float(obj.y2)
+    bbox_area_ratio = ((x2 - x1) * (y2 - y1)) / (iw * ih) * 100
+
+    # 거리 추정 및 스무딩
+    smoothed_dist = _get_smoothed_distance(lk, raw_depth)
+    motion_state = _determine_motion_state(lk, raw_depth, bbox_area_ratio)
+
+    # 신뢰도 판단
+    confidence = "high"
+    if raw_depth < 0.1 or raw_depth > 10.0:
+        confidence = "low"
+    elif abs(raw_depth - smoothed_dist) > 0.5:
+        confidence = "medium"
+
+    distance_text = f"약 {smoothed_dist:.1f}m"
+    if confidence == "low":
+        distance_text = "가까운 위치" if raw_depth < 1.0 else "멀지 않은 위치"
+
+    description = f"{position_ko} {distance_text} 거리에 {label_ko}{_subject_particle_iga(label_ko)} 있습니다."
+
+    risk_level = 0
+    warning_threshold = danger_threshold * 1.5
+    if bbox_area_ratio > 5.0 and y_norm >= 0.20:
+        if smoothed_dist <= danger_threshold: risk_level = 2
+        elif smoothed_dist <= warning_threshold: risk_level = 1
+            
+    risk_level_str = {2: "danger", 1: "warning", 0: "safe"}[risk_level]
 
     return {
-    "label": obj.label,
-    "confidence": confidence_f,
-    "position": position,
-    "distance": f"{dist_val:.1f}m",
-    "is_empty": is_empty,
-    "description": description,
-    
-    # Flutter가 '비율 * 화면크기' 연산을 수행할 수 있도록 비율로 변경합니다.
-    "x1": round(float(x1 / iw if iw > 0 else 0.0), 4),
-    "y1": round(float(y1 / ih if ih > 0 else 0.0), 4),
-    "x2": round(float(x2 / iw if iw > 0 else 0.0), 4),
-    "y2": round(float(y2 / ih if ih > 0 else 0.0), 4),
-    
-        "bbox_xyxy_px": {"x1": round(x1, 2), "y1": round(y1, 2), "x2": round(x2, 2), "y2": round(y2, 2)},
-        "bbox": {
-            "x": round(float(x1 / iw if iw > 0 else 0.0), 4),
-            "y": round(float(y1 / ih if ih > 0 else 0.0), 4),
-            "w": round(float(w_px / iw if iw > 0 else 0.0), 4),
-            "h": round(float(h_px / ih if ih > 0 else 0.0), 4),
-        },
-        "distance_estimate_m": distance_estimate_m,
-        "distance_level": distance_level,
-        "is_dangerous": is_dangerous,
+        "label": obj.label,
+        "label_ko": label_ko,
+        "confidence": round(float(obj.confidence), 4),
+        "position": position,
+        "position_ko": position_ko,
+        "distance": f"{raw_depth:.1f}m",
+        "distance_text": distance_text,
+        "estimated_distance_m": round(smoothed_dist, 2),
+        "raw_depth_value": round(raw_depth, 3),
+        "reference_depth": reference_depth,
+        "distance_confidence": confidence,
+        "motion_state": motion_state,
+        "is_empty": is_empty,
+        "description": description,
+        "x1": round(float(x1 / iw), 4) if iw > 0 else 0,
+        "y1": round(float(y1 / ih), 4) if ih > 0 else 0,
+        "x2": round(float(x2 / iw), 4) if iw > 0 else 0,
+        "y2": round(float(y2 / ih), 4) if ih > 0 else 0,
         "risk_level": risk_level,
-        "area_ratio_percent": round(area_ratio_percent, 2),
-        "is_over_30_percent": area_ratio_percent > 30.0,
+        "risk_level_str": risk_level_str,
+        "area_ratio_percent": round(bbox_area_ratio, 2),
     }
+
+def _norm_label(label: str) -> str:
+    return str(label).lower()

@@ -112,7 +112,7 @@ class LiteMonoDepthEstimator:
         import torch
 
         original_width, original_height = pil_image.size
-        resized = pil_image.resize((self.feed_width, self.feed_height), Image.LANCZOS)
+        resized = pil_image.resize((self.feed_width, self.feed_height), Image.BILINEAR)
         tensor = self.to_tensor(resized).unsqueeze(0).to(self.device)
 
         with torch.no_grad():

@@ -113,25 +113,105 @@ def detections_from_yolo(yolo_image_result: Any) -> List[SpatialDetection]:
     return out
 
 _LABEL_KR: Dict[str, str] = {
+    # COCO 80 classes (전체 한글 매핑)
+    # 사람
     "person": "사람",
-    "chair": "의자",
-    "car": "자동차",
-    "truck": "트럭",
-    "bus": "버스",
+    # 탈것
     "bicycle": "자전거",
+    "car": "자동차",
     "motorcycle": "오토바이",
+    "airplane": "비행기",
+    "bus": "버스",
+    "train": "기차",
+    "truck": "트럭",
+    "boat": "보트",
+    # 도로/교통
     "traffic light": "신호등",
+    "fire hydrant": "소화전",
     "stop sign": "정지 표지판",
+    "parking meter": "주차 미터기",
+    # 야외 시설
     "bench": "벤치",
+    # 동물
+    "bird": "새",
+    "cat": "고양이",
+    "dog": "개",
+    "horse": "말",
+    "sheep": "양",
+    "cow": "소",
+    "elephant": "코끼리",
+    "bear": "곰",
+    "zebra": "얼룩말",
+    "giraffe": "기린",
+    # 액세서리
+    "backpack": "가방",
+    "umbrella": "우산",
+    "handbag": "핸드백",
+    "tie": "넥타이",
+    "suitcase": "여행가방",
+    # 스포츠 용품
+    "frisbee": "프리스비",
+    "skis": "스키",
+    "snowboard": "스노보드",
+    "sports ball": "공",
+    "kite": "연",
+    "baseball bat": "야구 방망이",
+    "baseball glove": "야구 글러브",
+    "skateboard": "스케이트보드",
+    "surfboard": "서프보드",
+    "tennis racket": "테니스 라켓",
+    # 주방/식기
+    "bottle": "병",
+    "wine glass": "와인잔",
+    "cup": "컵",
+    "fork": "포크",
+    "knife": "칼",
+    "spoon": "숟가락",
+    "bowl": "그릇",
+    # 음식
+    "banana": "바나나",
+    "apple": "사과",
+    "sandwich": "샌드위치",
+    "orange": "오렌지",
+    "broccoli": "브로콜리",
+    "carrot": "당근",
+    "hot dog": "핫도그",
+    "pizza": "피자",
+    "donut": "도넛",
+    "cake": "케이크",
+    # 가구/실내
+    "chair": "의자",
     "couch": "소파",
+    "potted plant": "화분",
+    "bed": "침대",
+    "dining table": "식탁",
     "toilet": "변기",
+    # 전자기기
+    "tv": "TV",
+    "laptop": "노트북",
+    "mouse": "마우스",
+    "remote": "리모컨",
+    "keyboard": "키보드",
+    "cell phone": "휴대폰",
+    # 가전
+    "microwave": "전자레인지",
+    "oven": "오븐",
+    "toaster": "토스터",
+    "sink": "세면대",
+    "refrigerator": "냉장고",
+    # 기타 실내
+    "book": "책",
+    "clock": "시계",
+    "vase": "꽃병",
+    "scissors": "가위",
+    "teddy bear": "인형",
+    "hair drier": "드라이어",
+    "toothbrush": "칫솔",
+    # 기존 커스텀 항목 (COCO 외 추가)
     "stairs": "계단",
     "door": "문",
     "table": "테이블",
     "pole": "기둥",
-    "potted plant": "화분",
-    "dog": "개",
-    "cat": "고양이",
     "wall": "벽",
     "curb": "턱",
     "crosswalk": "횡단보도",
@@ -139,51 +219,74 @@ _LABEL_KR: Dict[str, str] = {
 }
 
 # 객체 추적 및 분석을 위한 전역 상태 (메모리 내 캐시)
-_object_history: Dict[str, Dict[str, Any]] = {} # {label: {"depth": [], "area": [], "pos": []}}
+# key: "label:pos_bucket" 형태로 위치별 구분 (예: "person:center")
+_object_history: Dict[str, Dict[str, Any]] = {}
 
-def _determine_motion_state(label: str, current_dist: float, current_area: float) -> str:
-    """깊이와 면적 변화를 동시에 분석하여 접근 속도 판단 (Phase 5.6)"""
-    if label not in _object_history:
-        _object_history[label] = {"depth": [], "area": [], "pos": []}
-    
-    hist = _object_history[label]
+def _pos_bucket(x_norm: float) -> str:
+    """x 중심 좌표를 left/center/right 버킷으로 변환"""
+    if x_norm < 0.33:
+        return "left"
+    elif x_norm <= 0.66:
+        return "center"
+    else:
+        return "right"
+
+
+def _determine_motion_state(label: str, current_dist: float, current_area: float, x_norm: float = 0.5) -> str:
+    """
+    bbox 면적 변화(주) + 깊이 변화(보조)로 접근 여부 판단.
+    키를 label+위치버킷으로 관리해 여러 동일 객체 혼용 방지.
+    """
+    key = f"{label}:{_pos_bucket(x_norm)}"
+
+    if key not in _object_history:
+        _object_history[key] = {"depth": [], "area": []}
+
+    hist = _object_history[key]
     hist["depth"].append(current_dist)
     hist["area"].append(current_area)
-    
+
+    # 최대 5프레임 유지
     if len(hist["depth"]) > 5:
         hist["depth"].pop(0)
         hist["area"].pop(0)
-    
-    if len(hist["depth"]) < 3:
+
+    # 최소 2프레임부터 판단 (기존 3 → 2)
+    if len(hist["depth"]) < 2:
         return "stable"
-    
-    # 최근 3~5프레임 추세
+
     depth_diffs = [hist["depth"][i] - hist["depth"][i-1] for i in range(1, len(hist["depth"]))]
-    area_diffs = [hist["area"][i] - hist["area"][i-1] for i in range(1, len(hist["area"]))]
-    
+    area_diffs  = [hist["area"][i]  - hist["area"][i-1]  for i in range(1, len(hist["area"]))]
+
     avg_depth_diff = sum(depth_diffs) / len(depth_diffs)
-    avg_area_diff = sum(area_diffs) / len(area_diffs)
-    
-    # 거리는 줄어들고 면적은 늘어날 때만 '접근'으로 판단 (오탐 방지)
-    if avg_depth_diff < -0.15 and avg_area_diff > 0.5:
+    avg_area_diff  = sum(area_diffs)  / len(area_diffs)
+
+    # 면적 증가(주 신호) OR 깊이 감소(보조 신호) → 접근으로 판단
+    area_fast  = avg_area_diff > 1.5     # 면적이 빠르게 증가
+    area_slow  = avg_area_diff > 0.3     # 면적이 서서히 증가
+    depth_fast = avg_depth_diff < -0.15  # 깊이가 빠르게 감소
+    depth_slow = avg_depth_diff < -0.05  # 깊이가 서서히 감소
+    moving_away = avg_area_diff < -0.3 and avg_depth_diff > 0.05
+
+    if area_fast or (area_slow and depth_fast):
         return "approaching_fast"
-    elif avg_depth_diff < -0.05 and avg_area_diff > 0.1:
+    elif area_slow or depth_slow:
         return "approaching_slow"
-    elif avg_depth_diff > 0.05 and avg_area_diff < -0.1:
+    elif moving_away:
         return "moving_away"
     else:
         return "stable"
 
-def _get_smoothed_distance(label: str, current_dist: float) -> float:
+def _get_smoothed_distance(label: str, current_dist: float, x_norm: float = 0.5) -> float:
     """이동평균을 활용한 거리 스무딩"""
-    if label not in _object_history:
+    key = f"{label}:{_pos_bucket(x_norm)}"
+    if key not in _object_history:
         return current_dist
-    
-    depths = _object_history[label]["depth"]
+
+    depths = _object_history[key]["depth"]
     if not depths:
         return current_dist
-    
-    # 최근 3프레임 평균
+
     recent = depths[-3:] if len(depths) >= 3 else depths
     return sum(recent) / len(recent)
 
@@ -242,35 +345,48 @@ def analyze_spatial_results(
 
 def calculate_safe_direction(analyzed_objects: List[Dict[str, Any]]) -> str:
     """
-    영역별 위험 점수를 계산하여 가장 안전한 방향을 추천합니다.
+    바운딩 박스의 좌/중/우 영역 겹침 비율로 점수를 분배하여 가장 안전한 방향을 추천합니다.
+    (개선) 중심점 기반 → bbox 전체 범위 기반으로 오탐 방지.
     """
+    LEFT_END = 0.33
+    RIGHT_START = 0.66
+
     left_score = 0.0
     center_score = 0.0
     right_score = 0.0
-    
+
     for obj in analyzed_objects:
         rl = obj.get("risk_level", 0)
-        if rl == 0: continue
-        
+        if rl == 0:
+            continue
+
         dist = obj.get("estimated_distance_m", 5.0)
         area = obj.get("area_ratio_percent", 1.0)
         weight = 10.0 if rl == 2 else 3.0
         obj_score = weight * (2.0 / max(dist, 0.5)) * (area / 10.0)
-        
-        pos = obj.get("position", "center")
-        if pos == "left": left_score += obj_score
-        elif pos == "right": right_score += obj_score
-        else: center_score += obj_score
-            
+
+        # bbox 전체 범위로 좌/중/우 겹침 비율 계산
+        zone_overlap = obj.get("zone_overlap")
+        if zone_overlap:
+            left_score   += obj_score * zone_overlap.get("left", 0.0)
+            center_score += obj_score * zone_overlap.get("center", 0.0)
+            right_score  += obj_score * zone_overlap.get("right", 0.0)
+        else:
+            # fallback: 기존 position 방식
+            pos = obj.get("position", "center")
+            if pos == "left":   left_score += obj_score
+            elif pos == "right": right_score += obj_score
+            else:                center_score += obj_score
+
     if center_score > CENTER_DANGER_THRESHOLD:
         if left_score < CENTER_DANGER_THRESHOLD and left_score <= right_score: return "left"
         elif right_score < CENTER_DANGER_THRESHOLD and right_score <= left_score: return "right"
         else: return "stop"
-            
+
     if left_score > SIDE_DANGER_THRESHOLD and right_score < CENTER_DANGER_THRESHOLD: return "right"
     if right_score > SIDE_DANGER_THRESHOLD and left_score < CENTER_DANGER_THRESHOLD: return "left"
     if (left_score + center_score + right_score) > STOP_THRESHOLD: return "stop"
-        
+
     return "forward"
 
 
@@ -314,8 +430,8 @@ def _process_single_object(
     bbox_area_ratio = ((x2 - x1) * (y2 - y1)) / (iw * ih) * 100
 
     # 거리 추정 및 스무딩
-    smoothed_dist = _get_smoothed_distance(lk, raw_depth)
-    motion_state = _determine_motion_state(lk, raw_depth, bbox_area_ratio)
+    smoothed_dist = _get_smoothed_distance(lk, raw_depth, x_norm)
+    motion_state = _determine_motion_state(lk, raw_depth, bbox_area_ratio, x_norm)
 
     # 신뢰도 판단
     confidence = "high"
@@ -338,6 +454,16 @@ def _process_single_object(
             
     risk_level_str = {2: "danger", 1: "warning", 0: "safe"}[risk_level]
 
+    # 바운딩 박스가 좌/중/우 영역에 얼마나 겹치는지 비율 계산
+    LEFT_END = 0.33
+    RIGHT_START = 0.66
+    x1_norm = x1 / iw if iw > 0 else 0.0
+    x2_norm = x2 / iw if iw > 0 else 1.0
+    bbox_w = max(x2_norm - x1_norm, 1e-6)
+    left_overlap   = max(0.0, min(x2_norm, LEFT_END)   - max(x1_norm, 0.0))      / bbox_w
+    center_overlap = max(0.0, min(x2_norm, RIGHT_START) - max(x1_norm, LEFT_END)) / bbox_w
+    right_overlap  = max(0.0, min(x2_norm, 1.0)         - max(x1_norm, RIGHT_START)) / bbox_w
+
     return {
         "label": obj.label,
         "label_ko": label_ko,
@@ -353,13 +479,18 @@ def _process_single_object(
         "motion_state": motion_state,
         "is_empty": is_empty,
         "description": description,
-        "x1": round(float(x1 / iw), 4) if iw > 0 else 0,
+        "x1": round(x1_norm, 4),
         "y1": round(float(y1 / ih), 4) if ih > 0 else 0,
-        "x2": round(float(x2 / iw), 4) if iw > 0 else 0,
+        "x2": round(x2_norm, 4),
         "y2": round(float(y2 / ih), 4) if ih > 0 else 0,
         "risk_level": risk_level,
         "risk_level_str": risk_level_str,
         "area_ratio_percent": round(bbox_area_ratio, 2),
+        "zone_overlap": {
+            "left":   round(left_overlap, 4),
+            "center": round(center_overlap, 4),
+            "right":  round(right_overlap, 4),
+        },
     }
 
 def _norm_label(label: str) -> str:

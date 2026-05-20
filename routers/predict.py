@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from services.depth import LITEMONO_MODEL_NAME, depth_estimator
 from services.detection import _extract_objects, _read_image, model
 from services.spatial_analysis import OVERLAP_RATIO_THRESHOLD_DEFAULT, analyze_spatial_results, detections_from_yolo
-from services.guide_service import guide_service
+from services.guide_service import guide_service, build_hazard_summary
 
 router = APIRouter(prefix="/predict", tags=["predict"])
 
@@ -154,24 +154,24 @@ async def predict_objects_distance(
         for o in analyzed_data
     ]
 
-    # Phase 5.6: 안내 대상 객체 선정 (최대 2개)
+    # Phase 5.6: 안내 대상 객체 선정 (최대 3개)
     # 위험도 높은 순으로 1차 필터링
     risky_objects = [o for o in objects if o.risk_level > 0]
     
-    # 만약 위험 객체가 1개 이하라면, 회피 방향에 영향을 주는 다른 객체도 후보로 포함
-    if len(risky_objects) < 2:
+    # 만약 위험 객체가 2개 이하라면, 회피 방향에 영향을 주는 다른 객체도 후보로 포함
+    if len(risky_objects) < 3:
         safe_objects = [o for o in objects if o.risk_level == 0]
         # 회피 방향(safe_dir 계산 전이지만 위치로 추정) 근처 객체나 전방 객체 추가
-        risky_objects.extend(safe_objects[:2 - len(risky_objects)])
+        risky_objects.extend(safe_objects[:3 - len(risky_objects)])
 
-    display_objects = risky_objects[:2]
+    display_objects = risky_objects[:3]
     
     main_hazard = "감지된 위험 요소 없음"
     risk_level_str = "safe"
     if display_objects:
         top_obj = display_objects[0]
         risk_level_str = "danger" if top_obj.risk_level == 2 else ("warning" if top_obj.risk_level == 1 else "safe")
-        main_hazard = f"{top_obj.position_ko} {top_obj.label_ko}"
+        main_hazard = build_hazard_summary([o.dict() for o in display_objects])
 
     from services.spatial_analysis import calculate_safe_direction
     safe_dir = calculate_safe_direction(analyzed_data)

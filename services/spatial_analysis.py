@@ -262,11 +262,12 @@ def _determine_motion_state(label: str, current_dist: float, current_area: float
     avg_area_diff  = sum(area_diffs)  / len(area_diffs)
 
     # 면적 증가(주 신호) OR 깊이 감소(보조 신호) → 접근으로 판단
-    area_fast  = avg_area_diff > 1.5     # 면적이 빠르게 증가
-    area_slow  = avg_area_diff > 0.3     # 면적이 서서히 증가
-    depth_fast = avg_depth_diff < -0.15  # 깊이가 빠르게 감소
-    depth_slow = avg_depth_diff < -0.05  # 깊이가 서서히 감소
-    moving_away = avg_area_diff < -0.3 and avg_depth_diff > 0.05
+    # YOLO 박스 흔들림이나 깊이 노이즈로 인한 오탐 방지를 위해 기준값을 높임
+    area_fast  = avg_area_diff > 3.0     # 면적이 빠르게 증가 (기존 1.5 -> 3.0)
+    area_slow  = avg_area_diff > 1.0     # 면적이 서서히 증가 (기존 0.3 -> 1.0)
+    depth_fast = avg_depth_diff < -0.30  # 깊이가 빠르게 감소 (기존 -0.15 -> -0.30)
+    depth_slow = avg_depth_diff < -0.10  # 깊이가 서서히 감소 (기존 -0.05 -> -0.10)
+    moving_away = avg_area_diff < -0.5 and avg_depth_diff > 0.10
 
     if area_fast or (area_slow and depth_fast):
         return "approaching_fast"

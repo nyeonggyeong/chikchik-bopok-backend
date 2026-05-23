@@ -186,10 +186,9 @@ class GuideService:
 1. 절대 이미지 설명 금지 ("보입니다", "사진 속에" 등 금지)
 2. 같은 종류 객체가 여러 명/개면 숫자를 포함하세요. 예: "전방 사람 2명과 노트북 주의"
 3. 거리 신뢰도 'low'면 숫자 대신 "가까운 위치"로 표현하세요.
-4. 빠르게 접근 중(approaching_fast)이면 최우선으로 "멈추세요" 안내.
-5. 서서히 접근 중(approaching_slow)이면 "가까워지고 있습니다"와 방향 안내를 포함하세요.
-6. 추천 방향({safe_direction})을 행동으로 지시하세요.
-7. 1~2문장, 짧고 행동 중심적으로 작성하세요.
+4. 빠르게 접근 중(approaching_fast)이면 최우선으로 "멈추세요" 안내. 서서히 접근(approaching_slow)는 일반 주의 메시지.
+5. 추천 방향({safe_direction})을 행동으로 지시하세요.
+6. 1~2문장, 짧고 행동 중심적으로 작성하세요.
 7. 출력은 오직 한국어 안내 문장만 하세요.
 """
 
@@ -201,15 +200,10 @@ class GuideService:
         action = dir_map.get(safe_direction, "주의하세요.")
 
         if display_objects:
-            # 1순위: 빠르게 접근
+            # approaching_fast만 즉시 경고 (approaching_slow는 일반 주의 메시지)
             fast = next((o for o in display_objects if o.get('motion_state') == 'approaching_fast'), None)
-            # 2순위: 서서히 접근
-            slow = next((o for o in display_objects if o.get('motion_state') == 'approaching_slow'), None)
-
             if fast:
                 msg = f"{fast['position_ko']} {fast['label_ko']}가 빠르게 가까워집니다. {action}"
-            elif slow:
-                msg = f"{slow['position_ko']} {slow['label_ko']}가 가까워지고 있습니다. {action}"
             else:
                 summary = build_hazard_summary(display_objects)
                 msg = f"{summary} 주의. {action}"

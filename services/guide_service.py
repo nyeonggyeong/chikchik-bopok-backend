@@ -220,6 +220,3 @@ class GuideService:
 
 # 싱글톤 인스턴스
 guide_service = GuideService()
-
-# 싱글톤 인스턴스
-guide_service = GuideService()

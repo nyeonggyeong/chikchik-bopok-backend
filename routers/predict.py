@@ -1,12 +1,15 @@
+import json
+import time
+from io import BytesIO
 from typing import Any, Dict, List, Literal, Optional
 
-import time
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from PIL import Image
 from pydantic import BaseModel
 
 from services.depth import LITEMONO_MODEL_NAME, depth_estimator
 from services.detection import _extract_objects, _read_image, model
-from services.spatial_analysis import OVERLAP_RATIO_THRESHOLD_DEFAULT, analyze_spatial_results, detections_from_yolo
+from services.spatial_analysis import OVERLAP_RATIO_THRESHOLD_DEFAULT, analyze_spatial_results, detections_from_yolo, calculate_safe_direction
 from services.guide_service import guide_service, build_hazard_summary
 
 router = APIRouter(prefix="/predict", tags=["predict"])
@@ -173,7 +176,6 @@ async def predict_objects_distance(
         risk_level_str = "danger" if top_obj.risk_level == 2 else ("warning" if top_obj.risk_level == 1 else "safe")
         main_hazard = build_hazard_summary([o.dict() for o in display_objects])
 
-    from services.spatial_analysis import calculate_safe_direction
     safe_dir = calculate_safe_direction(analyzed_data)
 
     # Gemini 가이드 생성 (Phase 5.6: 모든 상세 필드 전달)
@@ -197,3 +199,182 @@ async def predict_objects_distance(
         display_objects=display_objects,
         objects=objects
     )
+
+
+def _build_spatial_objects(
+    analyzed_data: List[Dict[str, Any]],
+    reference_depth: float,
+) -> List[SpatialAnalysisObject]:
+    """analyze_spatial_results 결과를 SpatialAnalysisObject 리스트로 변환하는 공통 헬퍼."""
+    return [
+        SpatialAnalysisObject(
+            label=o["label"],
+            label_ko=o.get("label_ko", o["label"]),
+            confidence=o["confidence"],
+            position=o["position"],
+            position_ko=o.get("position_ko", "전방"),
+            distance=o["distance"],
+            distance_text=o.get("distance_text", o["distance"]),
+            is_empty=o["is_empty"],
+            description=o["description"],
+            x1=o["x1"],
+            y1=o["y1"],
+            x2=o["x2"],
+            y2=o["y2"],
+            estimated_distance_m=o["estimated_distance_m"],
+            raw_depth_value=o.get("raw_depth_value", 0.0),
+            reference_depth=reference_depth,
+            distance_confidence=o.get("distance_confidence", "medium"),
+            risk_level=o.get("risk_level", 0),
+            motion_state=o.get("motion_state", "stable"),
+        )
+        for o in analyzed_data
+    ]
+
+
+def _select_display_objects(
+    objects: List[SpatialAnalysisObject],
+) -> List[SpatialAnalysisObject]:
+    """위험도 기준으로 최대 3개 안내 객체 선정."""
+    risky = [o for o in objects if o.risk_level > 0]
+    if len(risky) < 3:
+        safe = [o for o in objects if o.risk_level == 0]
+        risky.extend(safe[: 3 - len(risky)])
+    return risky[:3]
+
+
+@router.websocket("/ws")
+async def predict_websocket(
+    websocket: WebSocket,
+    danger_threshold: float = 1.5,
+    overlap_threshold: float = OVERLAP_RATIO_THRESHOLD_DEFAULT,
+    reference_depth: float = 1.0,
+) -> None:
+    """
+    WebSocket 실시간 스트리밍 엔드포인트.
+
+    클라이언트 → 서버: 이미지 바이너리(JPEG/PNG) 전송
+    서버 → 클라이언트: PredictObjectsSpatialResponse JSON 문자열 push
+
+    연결 URL 예시:
+        ws://<host>/predict/ws?danger_threshold=1.5&overlap_threshold=0.3&reference_depth=1.0
+    """
+    await websocket.accept()
+    print("🔌 [WebSocket] 클라이언트 연결됨")
+
+    try:
+        while True:
+            # 1. 클라이언트에서 이미지 바이너리 수신
+            raw_bytes = await websocket.receive_bytes()
+
+            frame_start = time.time()
+
+            # 2. 이미지 디코딩
+            try:
+                pil_image = Image.open(BytesIO(raw_bytes)).convert("RGB")
+            except Exception as exc:
+                await websocket.send_text(
+                    json.dumps({"error": f"이미지 디코딩 실패: {exc}"}, ensure_ascii=False)
+                )
+                continue
+
+            # 3. Depth 모델 준비 확인
+            if not depth_estimator.is_ready:
+                await websocket.send_text(
+                    json.dumps(
+                        {"error": f"Lite-Mono 미준비: {depth_estimator.error_message}"},
+                        ensure_ascii=False,
+                    )
+                )
+                continue
+
+            image_width, image_height = pil_image.size
+
+            # 4. YOLO 탐지
+            results = model(pil_image, verbose=False, conf=0.15)
+            if not results:
+                empty_resp = PredictObjectsSpatialResponse(
+                    risk_level="safe",
+                    main_hazard="감지된 위험 요소 없음",
+                    safe_direction="forward",
+                    process_time=f"{time.time() - frame_start:.3f}s",
+                    display_objects=[],
+                    objects=[],
+                )
+                await websocket.send_text(
+                    json.dumps(empty_resp.dict(), ensure_ascii=False)
+                )
+                continue
+
+            # 5. Lite-Mono 깊이 추정
+            depth_map = depth_estimator.predict_depth_map(pil_image)
+            h, w = depth_map.shape
+
+            # 6. 공간 분석
+            detection_list = detections_from_yolo(results[0])
+            analyzed_data = analyze_spatial_results(
+                detection_list,
+                depth_map,
+                w,
+                h,
+                overlap_threshold=overlap_threshold,
+                danger_threshold=danger_threshold,
+                reference_depth=reference_depth,
+            )
+
+            objects = _build_spatial_objects(analyzed_data, reference_depth)
+            display_objects = _select_display_objects(objects)
+
+            # 7. 위험도 및 주요 위험 요약
+            main_hazard = "감지된 위험 요소 없음"
+            risk_level_str = "safe"
+            if display_objects:
+                top = display_objects[0]
+                risk_level_str = (
+                    "danger" if top.risk_level == 2
+                    else "warning" if top.risk_level == 1
+                    else "safe"
+                )
+                main_hazard = build_hazard_summary([o.dict() for o in display_objects])
+
+            safe_dir = calculate_safe_direction(analyzed_data)
+
+            # 8. Gemini 안내 문장 생성
+            guide_result = await guide_service.generate_guide(
+                risk_level=risk_level_str,
+                main_hazard=main_hazard,
+                safe_direction=safe_dir,
+                display_objects=[o.dict() for o in display_objects],
+            )
+
+            total_time = time.time() - frame_start
+            print(
+                f"⏱️ [WS Frame] {total_time:.3f}s | "
+                f"risk={risk_level_str} | objects={len(objects)}"
+            )
+
+            # 9. JSON 결과 push
+            response = PredictObjectsSpatialResponse(
+                risk_level=risk_level_str,
+                main_hazard=main_hazard,
+                safe_direction=safe_dir,
+                guide_message=guide_result.get("guide_message", ""),
+                guide_source=guide_result.get("guide_source", "none"),
+                process_time=f"{total_time:.3f}s",
+                display_objects=display_objects,
+                objects=objects,
+            )
+            await websocket.send_text(
+                json.dumps(response.dict(), ensure_ascii=False)
+            )
+
+    except WebSocketDisconnect:
+        print("🔌 [WebSocket] 클라이언트 연결 종료")
+    except Exception as exc:
+        print(f"❌ [WebSocket] 오류: {exc}")
+        try:
+            await websocket.send_text(
+                json.dumps({"error": str(exc)}, ensure_ascii=False)
+            )
+        except Exception:
+            pass

@@ -7,9 +7,9 @@ from fastapi import HTTPException, UploadFile
 from ultralytics import YOLO
 
 # 가장 가벼운 YOLO11 가중치 사용 (없으면 ultralytics가 자동 다운로드)
+# 오픈 보캐블러리(YOLO-World) 모델이 너무 무겁고 인식이 잘 안 되는 문제가 있어 원래대로 롤백합니다.
 MODEL_WEIGHTS = "yolo11n.pt"
 model = YOLO(MODEL_WEIGHTS)
-
 
 def _extract_objects(result: Any, image_width: float, image_height: float, depth_map: np.ndarray | None = None, danger_threshold: float = 1.5) -> List[Dict[str, Any]]:
     names = result.names
@@ -21,10 +21,6 @@ def _extract_objects(result: Any, image_width: float, image_height: float, depth
         confidence = float(box.conf[0].item())
         class_id = int(box.cls[0].item())
         class_name = names[class_id] if class_id in names else str(class_id)
-
-        # [임시 테스트 코드] 의자(chair)나 벤치(bench)가 인식되면 'stairs'로 강제 변환하여 UI 로직 테스트
-        if class_name in ["chair", "bench"]:
-            class_name = "stairs"
 
         # 디버깅을 위해 인식된 객체의 클래스 ID와 이름 출력
         print(f"인식된 객체 클래스 ID: {class_id}, 최종 인식 이름: {class_name}")

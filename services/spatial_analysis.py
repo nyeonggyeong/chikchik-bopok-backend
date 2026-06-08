@@ -99,6 +99,11 @@ def detections_from_yolo(yolo_image_result: Any) -> List[SpatialDetection]:
         confidence = float(box.conf[0].item())
         class_id = int(box.cls[0].item())
         label = names[class_id] if class_id in names else str(class_id)
+        
+        # [임시 테스트 코드] 기본 모델로는 진짜 계단 인식이 불가하므로 UI 로직 테스트를 위해 의자/벤치를 강제 변환
+        if label in ["chair", "bench"]:
+            label = "stairs"
+            
         out.append(
             SpatialDetection(
                 label=str(label),
@@ -452,7 +457,17 @@ def _process_single_object(
     if bbox_area_ratio > 5.0 and y_norm >= 0.20:
         if smoothed_dist <= danger_threshold: risk_level = 2
         elif smoothed_dist <= warning_threshold: risk_level = 1
-            
+
+    stair_direction = None
+    if lk == "stairs":
+        # 계단은 시각장애인에게 주요 장애물이므로 위험도를 강제로 상향 조정
+        if risk_level == 0:
+            risk_level = 1 # 최소 '주의(warning)' 상태 부여
+        
+        # 거리가 가까운 경우 최고 '위험(danger)' 상태 부여
+        if smoothed_dist <= danger_threshold:
+            risk_level = 2
+
     risk_level_str = {2: "danger", 1: "warning", 0: "safe"}[risk_level]
 
     # 바운딩 박스가 좌/중/우 영역에 얼마나 겹치는지 비율 계산
@@ -464,28 +479,6 @@ def _process_single_object(
     left_overlap   = max(0.0, min(x2_norm, LEFT_END)   - max(x1_norm, 0.0))      / bbox_w
     center_overlap = max(0.0, min(x2_norm, RIGHT_START) - max(x1_norm, LEFT_END)) / bbox_w
     right_overlap  = max(0.0, min(x2_norm, 1.0)         - max(x1_norm, RIGHT_START)) / bbox_w
-
-    stair_direction = None
-    if lk == "stairs":
-        yi1 = int(max(y1, 0))
-        yi2 = int(min(y2, h))
-        xi1 = int(max(x1, 0))
-        xi2 = int(min(x2, w))
-        
-        if yi2 > yi1 and xi2 > xi1:
-            box_h = yi2 - yi1
-            quarter_h = max(1, box_h // 4)
-            
-            top_roi = depth_map[yi1 : yi1 + quarter_h, xi1 : xi2]
-            bottom_roi = depth_map[yi2 - quarter_h : yi2, xi1 : xi2]
-            
-            top_depth = float(np.mean(top_roi)) if top_roi.size > 0 else 0.0
-            bottom_depth = float(np.mean(bottom_roi)) if bottom_roi.size > 0 else 0.0
-            
-            if top_depth > bottom_depth:
-                stair_direction = "ascending"
-            else:
-                stair_direction = "descending"
 
     return {
         "label": obj.label,
@@ -518,4 +511,8 @@ def _process_single_object(
     }
 
 def _norm_label(label: str) -> str:
-    return str(label).lower()
+    lbl = str(label).lower()
+    # YOLO-World에서 인식률을 높이기 위해 추가한 유의어를 단일 'stairs'로 통일
+    if lbl in ("staircase", "steps"):
+        return "stairs"
+    return lbl

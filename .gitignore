@@ -8,8 +8,19 @@ venv/
 env/
 .env
 
-# Model weights (download automatically at runtime)
+# Model weights (too large for git, keep locally)
 yolo11n.pt
+yolov8s-world.pt
+weights/
+*.pt
+
+# Training output (ultralytics generates this)
+runs/
+
+# Downloaded dataset from Roboflow (too large for git)
+stairs-3/
+
+# Calibration
 calibration_data.json
 
 # OS/Editor

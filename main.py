@@ -1,3 +1,5 @@
+import sys
+import os
 from typing import Any, Dict
 
 from dotenv import load_dotenv
@@ -5,6 +7,9 @@ from fastapi import FastAPI, Form
 
 # 환경 변수 로드가 최우선
 load_dotenv()
+
+litemono_path = os.getenv("LITEMONO_REPO_PATH", "./Lite-Mono")
+sys.path.append(litemono_path)
 
 from routers import predict
 from services.depth import LITEMONO_MODEL_NAME, depth_estimator

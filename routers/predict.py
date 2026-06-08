@@ -35,6 +35,7 @@ class SpatialAnalysisObject(BaseModel):
     distance_confidence: str = "medium"
     risk_level: int
     motion_state: str = "stable"
+    stair_direction: Optional[str] = None
 
 
 class PredictObjectsSpatialResponse(BaseModel):
@@ -152,7 +153,8 @@ async def predict_objects_distance(
             reference_depth=reference_depth,
             distance_confidence=o.get("distance_confidence", "medium"),
             risk_level=o.get("risk_level", 0),
-            motion_state=o.get("motion_state", "stable")
+            motion_state=o.get("motion_state", "stable"),
+            stair_direction=o.get("stair_direction"),
         )
         for o in analyzed_data
     ]
@@ -227,6 +229,7 @@ def _build_spatial_objects(
             distance_confidence=o.get("distance_confidence", "medium"),
             risk_level=o.get("risk_level", 0),
             motion_state=o.get("motion_state", "stable"),
+            stair_direction=o.get("stair_direction"),
         )
         for o in analyzed_data
     ]

@@ -22,6 +22,13 @@ def _extract_objects(result: Any, image_width: float, image_height: float, depth
         class_id = int(box.cls[0].item())
         class_name = names[class_id] if class_id in names else str(class_id)
 
+        # [임시 테스트 코드] 의자(chair)나 벤치(bench)가 인식되면 'stairs'로 강제 변환하여 UI 로직 테스트
+        if class_name in ["chair", "bench"]:
+            class_name = "stairs"
+
+        # 디버깅을 위해 인식된 객체의 클래스 ID와 이름 출력
+        print(f"인식된 객체 클래스 ID: {class_id}, 최종 인식 이름: {class_name}")
+
         width = max(0.0, x2 - x1)
         height = max(0.0, y2 - y1)
         bbox_area = width * height

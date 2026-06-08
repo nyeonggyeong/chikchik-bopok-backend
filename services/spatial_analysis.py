@@ -465,9 +465,32 @@ def _process_single_object(
     center_overlap = max(0.0, min(x2_norm, RIGHT_START) - max(x1_norm, LEFT_END)) / bbox_w
     right_overlap  = max(0.0, min(x2_norm, 1.0)         - max(x1_norm, RIGHT_START)) / bbox_w
 
+    stair_direction = None
+    if lk == "stairs":
+        yi1 = int(max(y1, 0))
+        yi2 = int(min(y2, h))
+        xi1 = int(max(x1, 0))
+        xi2 = int(min(x2, w))
+        
+        if yi2 > yi1 and xi2 > xi1:
+            box_h = yi2 - yi1
+            quarter_h = max(1, box_h // 4)
+            
+            top_roi = depth_map[yi1 : yi1 + quarter_h, xi1 : xi2]
+            bottom_roi = depth_map[yi2 - quarter_h : yi2, xi1 : xi2]
+            
+            top_depth = float(np.mean(top_roi)) if top_roi.size > 0 else 0.0
+            bottom_depth = float(np.mean(bottom_roi)) if bottom_roi.size > 0 else 0.0
+            
+            if top_depth > bottom_depth:
+                stair_direction = "ascending"
+            else:
+                stair_direction = "descending"
+
     return {
         "label": obj.label,
         "label_ko": label_ko,
+        "stair_direction": stair_direction,
         "confidence": round(float(obj.confidence), 4),
         "position": position,
         "position_ko": position_ko,
